@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MEM_BRIDGE_INIT</title>
+</head>
+<body>
+<p>Message On Match End: storage bridge. This page only keeps the two chat messages you type in the
+mod, in this browser's local storage. It does not send anything anywhere.</p>
+<script>
+(function () {
+    'use strict';
+    // Talks to the Deadlock mod through the URL fragment (commands in) and document.title
+    // (replies out). Keys outside PREFIX are refused, so the page can't be used as general storage.
+    var PREFIX = 'MessageOnMatchEnd.';
+    var MAX_VALUE = 4000;
+    var lastQ = null;
+
+    function reply(obj) {
+        document.title = 'MEM_RES:' + JSON.stringify(obj);
+    }
+
+    function handle() {
+        var hash = String(location.hash || '');
+        if (hash.length < 2) return;
+        var msg;
+        try {
+            msg = JSON.parse(decodeURIComponent(hash.slice(1)));
+        } catch (e) {
+            return;
+        }
+        if (!msg || typeof msg.q !== 'string' || msg.q === lastQ) return; // never replay a command
+        lastQ = msg.q;
+        var key = msg.k;
+        if (typeof key !== 'string' || key.indexOf(PREFIX) !== 0 || key.length > 64) {
+            reply({ q: msg.q, ok: false, error: 'bad key' });
+            return;
+        }
+        try {
+            if (msg.f === 'save') {
+                var value = String(msg.v);
+                if (value.length > MAX_VALUE) throw new Error('value too long');
+                localStorage.setItem(key, value);
+                reply({ q: msg.q, ok: localStorage.getItem(key) === value });
+            } else if (msg.f === 'load') {
+                reply({ q: msg.q, ok: true, data: localStorage.getItem(key) });
+            } else if (msg.f === 'remove') {
+                localStorage.removeItem(key);
+                reply({ q: msg.q, ok: true });
+            } else {
+                reply({ q: msg.q, ok: false, error: 'bad command' });
+            }
+        } catch (e) {
+            reply({ q: msg.q, ok: false, error: String((e && e.message) || e) });
+        }
+    }
+
+    window.addEventListener('hashchange', handle);
+    // A fragment already present when the page first loads is ignored on purpose (stale command).
+    document.title = 'MEM_BRIDGE_READY:v1';
+})();
+</script>
+</body>
+</html>
