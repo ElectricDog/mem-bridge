@@ -6,8 +6,10 @@
 <title>MEM_BRIDGE_INIT</title>
 </head>
 <body>
-<p>Message On Match End: storage bridge. This page only keeps the two chat messages you type in the
-mod, in this browser's local storage. It does not send anything anywhere.</p>
+<p>Deadlock Mod Hub: storage bridge. This page keeps the mod's settings in this browser's local
+storage. If the mod's "look up Steam IDs" option is on, it also asks the public service
+deadlock-api.com which players were in a match (only the match number is sent). Nothing else is
+sent anywhere.</p>
 <script>
 (function () {
     'use strict';
@@ -21,6 +23,88 @@ mod, in this browser's local storage. It does not send anything anywhere.</p>
         document.title = 'MEM_RES:' + JSON.stringify(obj);
     }
 
+    // ---- match lookup (deadlock-api.com): who played which hero in a match, with Steam account IDs.
+    // Only the fixed address below is ever requested, with a match number; answers are kept so the
+    // same match is not asked for twice, and attempts are spaced out (the service allows few).
+    var API = 'https://api.deadlock-api.com/v1/';
+    var MATCH_KEY = PREFIX + 'api.match.';
+    var HERO_KEY = PREFIX + 'api.heroes';
+    var TRY_KEY = PREFIX + 'api.tries';
+
+    function readJson(key) { try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch (e) { return null; } }
+    function writeJson(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {} }
+
+    function getJson(url, cb) {
+        var done = false;
+        var finish = function (status, data) { if (!done) { done = true; cb(status, data); } };
+        var ctl = typeof AbortController === 'function' ? new AbortController() : null;
+        setTimeout(function () { try { if (ctl) ctl.abort(); } catch (e) {} finish(0, null); }, 12000);
+        try {
+            fetch(url, ctl ? { signal: ctl.signal } : undefined).then(function (res) {
+                if (!res.ok) { finish(res.status, null); return; }
+                res.json().then(function (data) { finish(200, data); }, function () { finish(0, null); });
+            }, function () { finish(0, null); });
+        } catch (e) { finish(0, null); }
+    }
+
+    function heroNames(cb) {
+        var saved = readJson(HERO_KEY);
+        if (saved && saved.m && Date.now() - Number(saved.t || 0) < 3 * 24 * 3600 * 1000) { cb(saved.m); return; }
+        getJson(API + 'assets/heroes', function (status, list) {
+            var map = {};
+            if (status === 200 && list && list.length) {
+                for (var i = 0; i < list.length; i += 1) {
+                    if (list[i] && list[i].id != null && list[i].name) map[String(list[i].id)] = String(list[i].name);
+                }
+                writeJson(HERO_KEY, { t: Date.now(), m: map });
+            } else if (saved && saved.m) {
+                map = saved.m; // an old list is better than none
+            }
+            cb(map);
+        });
+    }
+
+    function matchPlayers(msg) {
+        var id = String(msg.id || '').replace(/\D/g, '');
+        if (id.length < 4 || id.length > 12) { reply({ q: msg.q, ok: false, error: 'bad match' }); return; }
+        var kept = readJson(MATCH_KEY + id);
+        if (kept && kept.length) { reply({ q: msg.q, ok: true, players: kept, cached: true }); return; }
+        // spacing: one try per match every 40 seconds, six tries per match at most
+        var tries = readJson(TRY_KEY) || {};
+        var mine = tries[id] || { n: 0, t: 0 };
+        if (mine.n >= 6) { reply({ q: msg.q, ok: false, error: 'gave up' }); return; }
+        if (Date.now() - mine.t < 40000) { reply({ q: msg.q, ok: false, error: 'wait' }); return; }
+        var keep = {};
+        var ids = Object.keys(tries).sort(function (a, b) { return tries[b].t - tries[a].t; }).slice(0, 20);
+        for (var k = 0; k < ids.length; k += 1) keep[ids[k]] = tries[ids[k]];
+        keep[id] = { n: mine.n + 1, t: Date.now() };
+        writeJson(TRY_KEY, keep);
+        getJson(API + 'matches/' + id + '/metadata', function (status, data) {
+            if (status !== 200 || !data) {
+                reply({ q: msg.q, ok: false, error: status === 429 ? 'rate limited' : status === 0 ? 'no answer' : 'not ready', status: status });
+                return;
+            }
+            var info = data.match_info || data;
+            var list = (info && info.players) || [];
+            heroNames(function (names) {
+                var out = [];
+                for (var i = 0; i < list.length; i += 1) {
+                    var pl = list[i] || {};
+                    if (pl.account_id == null || pl.hero_id == null) continue;
+                    out.push({ a: String(pl.account_id), h: String(pl.hero_id), n: names[String(pl.hero_id)] || '' });
+                }
+                if (!out.length) { reply({ q: msg.q, ok: false, error: 'no players' }); return; }
+                writeJson(MATCH_KEY + id, out);
+                // keep only the last few matches
+                var order = readJson(MATCH_KEY + 'order') || [];
+                order.push(id);
+                while (order.length > 12) { try { localStorage.removeItem(MATCH_KEY + order.shift()); } catch (e) {} }
+                writeJson(MATCH_KEY + 'order', order);
+                reply({ q: msg.q, ok: true, players: out });
+            });
+        });
+    }
+
     function handle() {
         var hash = String(location.hash || '');
         if (hash.length < 2) return;
@@ -32,6 +116,7 @@ mod, in this browser's local storage. It does not send anything anywhere.</p>
         }
         if (!msg || typeof msg.q !== 'string' || msg.q === lastQ) return; // never replay a command
         lastQ = msg.q;
+        if (msg.f === 'match') { matchPlayers(msg); return; }
         var key = msg.k;
         if (typeof key !== 'string' || key.indexOf(PREFIX) !== 0 || key.length > 64) {
             reply({ q: msg.q, ok: false, error: 'bad key' });
