@@ -27,7 +27,8 @@ sent anywhere.</p>
     // Only the fixed address below is ever requested, with a match number; answers are kept so the
     // same match is not asked for twice, and attempts are spaced out (the service allows few).
     var API = 'https://api.deadlock-api.com/v1/';
-    var MATCH_KEY = PREFIX + 'api.match.';
+    var MATCH_KEY = PREFIX + 'api.match2.'; // v2: players carry their Steam name too
+    var RECENT_KEY = PREFIX + 'api.recent.';
     var HERO_KEY = PREFIX + 'api.heroes';
     var TRY_KEY = PREFIX + 'api.tries';
 
@@ -94,6 +95,23 @@ sent anywhere.</p>
                     out.push({ a: String(pl.account_id), h: String(pl.hero_id), n: names[String(pl.hero_id)] || '' });
                 }
                 if (!out.length) { reply({ q: msg.q, ok: false, error: 'no players' }); return; }
+                // Steam names, so players can be matched by the name shown in game
+                var accs = [];
+                for (var j = 0; j < out.length; j += 1) accs.push(out[j].a);
+                getJson(API + 'players/steam?account_ids=' + accs.join(','), function (st, profiles) {
+                    if (st === 200 && profiles && profiles.length) {
+                        var byAcc = {};
+                        for (var x = 0; x < profiles.length; x += 1) {
+                            var pr = profiles[x] || {};
+                            if (pr.account_id != null && pr.personaname) byAcc[String(pr.account_id)] = String(pr.personaname).slice(0, 64);
+                        }
+                        for (var y = 0; y < out.length; y += 1) if (byAcc[out[y].a]) out[y].p = byAcc[out[y].a];
+                    }
+                    keepMatch(out);
+                });
+            });
+        });
+        function keepMatch(out) {
                 writeJson(MATCH_KEY + id, out);
                 // keep only the last few matches
                 var order = readJson(MATCH_KEY + 'order') || [];
@@ -101,7 +119,30 @@ sent anywhere.</p>
                 while (order.length > 12) { try { localStorage.removeItem(MATCH_KEY + order.shift()); } catch (e) {} }
                 writeJson(MATCH_KEY + 'order', order);
                 reply({ q: msg.q, ok: true, players: out });
-            });
+        }
+    }
+
+    // Your own recent matches (number, start time, length), so the mod can tell which match a player
+    // was noted in when the game didn't show the match number. Only your own account number is sent.
+    function recentMatches(msg) {
+        var acc = String(msg.acc || '').replace(/\D/g, '');
+        if (acc.length < 3 || acc.length > 10) { reply({ q: msg.q, ok: false, error: 'bad account' }); return; }
+        var kept = readJson(RECENT_KEY + acc);
+        if (kept && Date.now() - Number(kept.t || 0) < 60000) { reply({ q: msg.q, ok: true, matches: kept.m || [], cached: true }); return; }
+        getJson(API + 'players/' + acc + '/match-history', function (status, list) {
+            if (status !== 200 || !list) {
+                reply({ q: msg.q, ok: false, error: status === 429 ? 'rate limited' : status === 0 ? 'no answer' : 'not found', status: status });
+                return;
+            }
+            var out = [];
+            for (var i = 0; i < list.length && out.length < 15; i += 1) {
+                var e = list[i] || {};
+                if (e.match_id == null) continue;
+                out.push({ m: String(e.match_id), s: Number(e.start_time) || 0, d: Number(e.match_duration_s) || 0 });
+            }
+            out.sort(function (a, b) { return b.s - a.s; });
+            writeJson(RECENT_KEY + acc, { t: Date.now(), m: out });
+            reply({ q: msg.q, ok: true, matches: out });
         });
     }
 
@@ -117,6 +158,7 @@ sent anywhere.</p>
         if (!msg || typeof msg.q !== 'string' || msg.q === lastQ) return; // never replay a command
         lastQ = msg.q;
         if (msg.f === 'match') { matchPlayers(msg); return; }
+        if (msg.f === 'recent') { recentMatches(msg); return; }
         var key = msg.k;
         if (typeof key !== 'string' || key.indexOf(PREFIX) !== 0 || key.length > 64) {
             reply({ q: msg.q, ok: false, error: 'bad key' });
