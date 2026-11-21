@@ -156,6 +156,40 @@ sent anywhere.</p>
         });
     }
 
+    // A short summary of a player's recent matches (for profile pages): last 25 matches - wins,
+    // losses, average kills / deaths / assists, three most played heroes. Kept for 10 minutes.
+    var STATS_KEY = PREFIX + 'api.stats.';
+    function playerStats(msg) {
+        var acc = String(msg.acc || '').replace(/\D/g, '');
+        if (acc.length < 1 || acc.length > 10) { reply({ q: msg.q, ok: false, error: 'bad account' }); return; }
+        var kept = readJson(STATS_KEY + acc);
+        if (kept && Date.now() - Number(kept.t || 0) < 10 * 60000) { reply({ q: msg.q, ok: true, d: kept.d, cached: true }); return; }
+        getJson(API + 'players/' + acc + '/match-history', function (status, list) {
+            if (status !== 200 || !list) { reply({ q: msg.q, ok: false, error: status === 429 ? 'rate limited' : status === 404 ? 'not found' : 'no answer', status: status }); return; }
+            list = list.slice().sort(function (a, b) { return (Number(b.start_time) || 0) - (Number(a.start_time) || 0); }).slice(0, 25);
+            if (!list.length) { reply({ q: msg.q, ok: false, error: 'not found' }); return; }
+            var w = 0, l = 0, k = 0, de = 0, a = 0, heroes = {};
+            for (var i = 0; i < list.length; i += 1) {
+                var m = list[i] || {};
+                if (Number(m.player_match_outcome) === 1) w += 1; else if (Number(m.player_match_outcome) === 2) l += 1;
+                k += Number(m.player_kills) || 0; de += Number(m.player_deaths) || 0; a += Number(m.player_assists) || 0;
+                var h = String(m.hero_id);
+                heroes[h] = heroes[h] || [0, 0];
+                heroes[h][0] += 1;
+                if (Number(m.player_match_outcome) === 1) heroes[h][1] += 1;
+            }
+            var n = list.length;
+            var one = function (x) { return Math.round(10 * x / n) / 10; };
+            var top = Object.keys(heroes).sort(function (x, y) { return heroes[y][0] - heroes[x][0]; }).slice(0, 3);
+            heroNames(function (names) {
+                var d = { n: n, w: w, l: l, k: one(k), de: one(de), a: one(a), h: [] };
+                for (var j = 0; j < top.length; j += 1) d.h.push([names[top[j]] || ('Hero ' + top[j]), heroes[top[j]][0], heroes[top[j]][1]]);
+                writeJson(STATS_KEY + acc, { t: Date.now(), d: d });
+                reply({ q: msg.q, ok: true, d: d });
+            });
+        });
+    }
+
     // Your own recent matches (number, start time, length), so the mod can tell which match a player
     // was noted in when the game didn't show the match number. Only your own account number is sent.
     function recentMatches(msg) {
@@ -194,6 +228,7 @@ sent anywhere.</p>
         if (msg.f === 'match') { matchPlayers(msg); return; }
         if (msg.f === 'recent') { recentMatches(msg); return; }
         if (msg.f === 'ranks') { playerRanks(msg); return; }
+        if (msg.f === 'stats') { playerStats(msg); return; }
         var key = msg.k;
         if (typeof key !== 'string' || key.indexOf(PREFIX) !== 0 || key.length > 64) {
             reply({ q: msg.q, ok: false, error: 'bad key' });
