@@ -190,6 +190,72 @@ sent anywhere.</p>
         });
     }
 
+    // Likely parties in a match: deadlock-api.com's "mate stats" with same_party=true lists who a
+    // player queued with (same team and Steam friends at the time) over the last 60 days. Players on
+    // the same team now who did that are grouped. A good guess, not certain. Kept 30 minutes each.
+    var MATES_KEY = PREFIX + 'api.mates.';
+    function partyMates(acc, cb) {
+        var kept = readJson(MATES_KEY + acc);
+        if (kept && Date.now() - Number(kept.t || 0) < 30 * 60000) { cb(kept.m || []); return; }
+        var since = Math.floor(Date.now() / 1000) - 60 * 24 * 3600;
+        getJson(API + 'players/' + acc + '/mate-stats?same_party=true&min_unix_timestamp=' + since, function (status, list) {
+            var out = [];
+            if (status === 200 && list && list.length) {
+                for (var i = 0; i < list.length; i += 1) if (list[i] && list[i].mate_id != null) out.push(String(list[i].mate_id));
+                writeJson(MATES_KEY + acc, { t: Date.now(), m: out.slice(0, 300) });
+            } else if (status === 200) writeJson(MATES_KEY + acc, { t: Date.now(), m: [] });
+            cb(out, status);
+        });
+    }
+    function partyGroups(msg) {
+        var teams = String(msg.teams || '').split('|').map(function (t) {
+            return t.split(',').filter(function (a) { return /^\d{1,10}$/.test(a); }).slice(0, 6);
+        }).slice(0, 2);
+        var all = [];
+        teams.forEach(function (t) { all = all.concat(t); });
+        if (all.length < 2) { reply({ q: msg.q, ok: false, error: 'no players' }); return; }
+        var mates = {}, left = all.length, failed = 0;
+        all.forEach(function (acc) {
+            partyMates(acc, function (list, status) {
+                mates[acc] = {};
+                for (var i = 0; i < list.length; i += 1) mates[acc][list[i]] = true;
+                if (status && status !== 200) failed += 1;
+                left -= 1;
+                if (left) return;
+                var groups = [];
+                teams.forEach(function (team) {
+                    var parent = {};
+                    var findp = function (x) { while (parent[x] !== x) x = parent[x] = parent[parent[x]]; return x; };
+                    team.forEach(function (a) { parent[a] = a; });
+                    for (var x = 0; x < team.length; x += 1) for (var y = x + 1; y < team.length; y += 1) {
+                        var a = team[x], b = team[y];
+                        if (mates[a][b] || mates[b][a]) parent[findp(a)] = findp(b);
+                    }
+                    var byRoot = {};
+                    team.forEach(function (a) { var r = findp(a); (byRoot[r] = byRoot[r] || []).push(a); });
+                    Object.keys(byRoot).forEach(function (r) { if (byRoot[r].length > 1) groups.push(byRoot[r].join(',')); });
+                });
+                reply({ q: msg.q, ok: failed < all.length, groups: groups.join(';') });
+            });
+        });
+    }
+
+    // Latest version and update time of a GameBanana mod (for the hub's update notes). Kept 6 hours.
+    var GB_KEY = PREFIX + 'gb.';
+    function gameBananaMod(msg) {
+        var id = String(msg.id || '').replace(/\D/g, '');
+        if (!id || id.length > 9) { reply({ q: msg.q, ok: false, error: 'bad id' }); return; }
+        var kept = readJson(GB_KEY + id);
+        if (kept && Date.now() - Number(kept.t || 0) < 6 * 3600 * 1000) { reply({ q: msg.q, ok: true, mod: kept.d, cached: true }); return; }
+        getJson('https://gamebanana.com/apiv11/Mod/' + id + '/ProfilePage', function (status, d) {
+            if (status !== 200 || !d) { reply({ q: msg.q, ok: false, error: status === 0 ? 'no answer' : 'status ' + status }); return; }
+            var out = { name: String(d._sName || '').slice(0, 80), version: String(d._sVersion || '').slice(0, 30),
+                updated: Number(d._tsDateUpdated || d._tsDateModified || d._tsDateAdded || 0) };
+            writeJson(GB_KEY + id, { t: Date.now(), d: out });
+            reply({ q: msg.q, ok: true, mod: out });
+        });
+    }
+
     // Your own recent matches (number, start time, length), so the mod can tell which match a player
     // was noted in when the game didn't show the match number. Only your own account number is sent.
     function recentMatches(msg) {
@@ -229,6 +295,8 @@ sent anywhere.</p>
         if (msg.f === 'recent') { recentMatches(msg); return; }
         if (msg.f === 'ranks') { playerRanks(msg); return; }
         if (msg.f === 'stats') { playerStats(msg); return; }
+        if (msg.f === 'party') { partyGroups(msg); return; }
+        if (msg.f === 'gbmod') { gameBananaMod(msg); return; }
         var key = msg.k;
         if (typeof key !== 'string' || key.indexOf(PREFIX) !== 0 || key.length > 64) {
             reply({ q: msg.q, ok: false, error: 'bad key' });
